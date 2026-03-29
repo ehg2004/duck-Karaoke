@@ -10,16 +10,16 @@ router = APIRouter(
 
 # Define what the incoming data from React should look like
 class KaraokeRequest(BaseModel):
-    url: str
+    song: str
 
 @router.post("/process")
 async def process_song(request: KaraokeRequest):
     """
-    This endpoint receives the YouTube URL from React.
+    This endpoint receives the song name from React.
     Eventually, your logic to download the song and fetch lyrics will go here.
     """
     
-    youtube_url = request.url
+    song_name = request.song
     
     # --- FUTURE LOGIC GOES HERE ---
     # 1. Use a tool like yt-dlp to extract the audio stream from youtube_url
@@ -27,10 +27,12 @@ async def process_song(request: KaraokeRequest):
     # 3. Figure out the timestamps for the lyrics
     # ------------------------------
 
+    print(f"Received song name: {song_name}")
+
     # For now, we return mock data so you can build your React frontend
     return {
         "status": "success",
-        "original_url": youtube_url,
+        "original_song_name": song_name,
         "audio_stream_url": "https://example.com/mock_audio.mp3", # You'll eventually serve real audio
         "lyrics": [
             {"time_seconds": 0.5, "text": "Somebody once told me"},
