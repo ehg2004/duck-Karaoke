@@ -16,26 +16,46 @@ class KaraokeRequest(BaseModel):
 async def process_song(request: KaraokeRequest):
     """
     This endpoint receives the song name from React.
-    Eventually, your logic to download the song and fetch lyrics will go here.
     """
     
     song_name = request.song
-    
-    # --- FUTURE LOGIC GOES HERE ---
-    # 1. Use a tool like yt-dlp to extract the audio stream from youtube_url
-    # 2. Fetch lyrics from an API (like Musixmatch or Genius)
-    # 3. Figure out the timestamps for the lyrics
-    # ------------------------------
 
-    print(f"Received song name: {song_name}")
+    # TO-DO call function to pre process the song here
 
-    # For now, we return mock data so you can build your React frontend
     return {
         "status": "success",
         "original_song_name": song_name,
-        "audio_stream_url": "https://example.com/mock_audio.mp3", # You'll eventually serve real audio
-        "lyrics": [
-            {"time_seconds": 0.5, "text": "Somebody once told me"},
-            {"time_seconds": 3.0, "text": "The world is gonna roll me"}
-        ]
     }
+
+def stream_karaoke_lyrics():
+    # Sample lyrics data (you would normally fetch this based on the requested song)
+    lyrics_data = [
+        {"time": 1.0, "phrase": "A duck walked up to a lemonade stand"},
+        {"time": 4.0, "phrase": "And he said to the man, running the stand"},
+        {"time": 7.5, "phrase": "Hey! (Bomp bomp bomp)"},
+        {"time": 9.5, "phrase": "Got any grapes?"}
+    ]
+    
+    start_time = time.time()
+    
+    for line in lyrics_data:
+        target_time = line["time"]
+        phrase = line["phrase"]
+        
+        time_to_wait = target_time - (time.time() - start_time)
+        
+        if time_to_wait > 0:
+            time.sleep(time_to_wait)
+            
+        response = {
+            "current_phrase": phrase,
+        }
+        
+        # REQUIRED FOR STREAMING: Format as Server-Sent Event (SSE)
+        yield f"data: {json.dumps(response)}\n\n"
+
+@router.get("/lyrics")
+async def play_lyrics():
+    return StreamingResponse(stream_karaoke_lyrics(), media_type="text/event-stream")
+
+    
