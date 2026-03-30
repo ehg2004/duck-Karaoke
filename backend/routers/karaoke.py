@@ -1,6 +1,9 @@
 # backend/routers/youtube.py
 from fastapi import APIRouter
 from pydantic import BaseModel
+from fastapi.responses import StreamingResponse
+import time
+import json
 
 # The prefix means every endpoint here will start with /api/karaoke
 router = APIRouter(
@@ -35,6 +38,8 @@ def stream_karaoke_lyrics():
         {"time": 7.5, "phrase": "Hey! (Bomp bomp bomp)"},
         {"time": 9.5, "phrase": "Got any grapes?"}
     ]
+
+    print(f"Got in")
     
     start_time = time.time()
     
