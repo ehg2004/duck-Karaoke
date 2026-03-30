@@ -1,0 +1,52 @@
+@startuml
+participant Frontend
+participant "Backend API" as BackendAPI
+participant "Song Processor" as SongProcessor
+participant AudioInput
+participant "ASR Thread" as ASRThread
+participant "Karaoke Run" as KaraokeRun
+
+Frontend -> BackendAPI: POST /process {song_name}
+BackendAPI -> SongProcessor: Download + Lyrics
+SongProcessor -> SongProcessor: Vocal Separation
+BackendAPI --> Frontend: OK {instrumental_url, lyrics}
+
+Frontend -> BackendAPI: POST /play_song {song_name}
+BackendAPI -> ASRThread: start
+BackendAPI -> KaraokeRun: start
+ASRThread -> AudioInput: Start mic capture
+BackendAPI --> Frontend: OK
+
+loop Lyrics and ASR Synchronization
+    Frontend -> BackendAPI: GET /lyric
+    BackendAPI -> KaraokeRun: get_new_lyrics
+    KaraokeRun -> KaraokeRun: verify if it should print new lyrics
+    KaraokeRun --> BackendAPI: {new : Bool, new_line}
+    BackendAPI --> Frontend: {new : Bool, new_line}
+    Frontend -> Frontend: Show lyrics (new line)
+
+    group In the background
+        AudioInput -> ASRThread: Send audio chunks
+        ASRThread -> ASRThread: Detect speech activity
+        ASRThread -> ASRThread: Accumulate until silence
+        ASRThread -> ASRThread: Send complete phrase
+        ASRThread -> KaraokeRun: write in the transcription buffer
+    end
+
+    group In the foreground
+        Frontend -> BackendAPI: GET /Results
+        BackendAPI -> KaraokeRun: fetch results
+        KaraokeRun -> KaraokeRun: verify if transcription buffer is not empty
+        KaraokeRun -> KaraokeRun: verify timestamp
+        KaraokeRun -> KaraokeRun: compare with lyric
+        KaraokeRun --> BackendAPI: send Result to be printed (if right timestamp)
+        BackendAPI --> Frontend: OK {Results}
+        Frontend -> Frontend: Show lyrics (line by line)
+    end
+end
+
+Frontend -> BackendAPI: GET /FinalResults
+KaraokeRun -> KaraokeRun: End audio output
+KaraokeRun -> ASRThread: End audio capture
+ASRThread -> AudioInput: Stop mic capture
+@enduml
