@@ -1,0 +1,58 @@
+@startuml
+participant Frontend
+participant "Backend API" as BackendAPI
+participant "Song Processor" as SongProcessor
+participant AudioInput
+participant "ASR Thread" as ASRThread
+participant "Karaoke Run" as KaraokeRun
+
+Frontend -> BackendAPI: POST /process {song_name}
+BackendAPI -> SongProcessor: Download + Lyrics
+SongProcessor -> SongProcessor: Vocal Separation
+BackendAPI --> Frontend: OK {instrumental_url, lyrics}
+
+Frontend -> BackendAPI: POST /play_song {song_name}
+BackendAPI -> ASRThread: start
+BackendAPI -> KaraokeRun: start
+ASRThread -> AudioInput: Start mic capture
+BackendAPI --> Frontend: OK
+
+== Streaming Connection ==
+Frontend -> BackendAPI: GET /stream_karaoke (FastAPI StreamingResponse)
+BackendAPI --> Frontend: Stream Connected (200 OK)
+
+loop Karaoke Session (Real-time Stream)
+    group In the background (ASR)
+        AudioInput -> ASRThread: Send audio chunks
+        ASRThread -> ASRThread: Detect speech activity
+        ASRThread -> ASRThread: Accumulate until silence
+        ASRThread -> ASRThread: Send complete phrase
+        ASRThread -> KaraokeRun: write in the transcription buffer
+    end
+
+    group FastAPI StreamingResponse (yields data)
+        KaraokeRun -> KaraokeRun: verify if it should print new lyrics
+        
+        alt new lyric available
+            KaraokeRun --> BackendAPI: yield {type: "lyric", new: Bool, new_line}
+            BackendAPI --> Frontend: stream chunk {type: "lyric", ...}
+            Frontend -> Frontend: Show lyrics (new line)
+        end
+
+        KaraokeRun -> KaraokeRun: verify if transcription buffer is not empty
+        KaraokeRun -> KaraokeRun: verify timestamp & compare with lyric
+        
+        alt new ASR result available (right timestamp)
+            KaraokeRun --> BackendAPI: yield {type: "result", Results}
+            BackendAPI --> Frontend: stream chunk {type: "result", ...}
+            Frontend -> Frontend: Update UI with scored results
+        end
+    end
+end
+
+== Teardown ==
+Frontend -> BackendAPI: GET /FinalResults
+KaraokeRun -> KaraokeRun: End audio output
+KaraokeRun -> ASRThread: End audio capture
+ASRThread -> AudioInput: Stop mic capture
+@enduml

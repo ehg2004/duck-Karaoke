@@ -6,7 +6,10 @@ __pycache__/
 #vocal_remover/
 vocal_remover/
 vocal_remover/*
-
+resources/*
+resources/originals/*
+resources/splitted/*
+resources/lyrics/*
 # C extensions
 *.so
 
@@ -209,3 +212,7 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+frontend/package-lock.json
+resources/index.csv
+resources/index.csv
+resources/index.csv
