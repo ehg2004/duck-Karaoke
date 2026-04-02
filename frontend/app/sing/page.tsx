@@ -4,6 +4,7 @@ import { Suspense, useEffect, useState } from "react";
 import { useSearchParams } from "next/navigation"; 
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { FinalResults, StreamEvent } from "@/lib/types";
 
 const SingContent = () => {
     const searchParams = useSearchParams();
@@ -12,7 +13,10 @@ const SingContent = () => {
     const songName = searchParams.get("song") || "Unknown Song";
 
     const [currentLyric, setCurrentLyric] = useState("Waiting for the music to start... 🎵");
+    const [recentTranscriptions, setRecentTranscriptions] = useState<string[]>([]);
     const [isStopping, setIsStopping] = useState(false);
+    const [isSessionEnded, setIsSessionEnded] = useState(false);
+    const [finalResults, setFinalResults] = useState<FinalResults | null>(null);
     
     const stopSession = async () => {
         if (isStopping || !sessionId) return;
@@ -28,16 +32,38 @@ const SingContent = () => {
             if (response.ok) {
                 const data = await response.json();
                 console.log("Session stopped:", data);
+                setIsSessionEnded(true);
+                
+                // Fetch final results
+                await fetchFinalResults();
             } else {
                 console.error("Failed to stop session:", response.statusText);
             }
         } catch (error) {
             console.error("Error stopping session:", error);
         } finally {
-            // Navigate away regardless of success/failure
-            window.location.href = "/";
+            setIsStopping(false);
         }
     };
+    
+    const fetchFinalResults = async () => {
+        try {
+            const response = await fetch("http://localhost:8000/api/karaoke/FinalResults", {
+                method: "GET",
+            });
+            
+            if (response.ok) {
+                const data: FinalResults = await response.json();
+                console.log("Final results:", data);
+                setFinalResults(data);
+            } else {
+                console.error("Failed to fetch final results:", response.statusText);
+            }
+        } catch (error) {
+            console.error("Error fetching final results:", error);
+        }
+    };
+    
     
     useEffect(() => {
         let isMounted = true;
@@ -99,16 +125,16 @@ const SingContent = () => {
                     const lines = chunk.split('\n');
                     for (const line of lines) {
                         if (line.startsWith('data: ')) {
-                            const jsonData = JSON.parse(line.replace('data: ', ''));
+                            const jsonData: StreamEvent = JSON.parse(line.replace('data: ', ''));
                             
                             // Update the React state with the lyric or result
                             if (isMounted) {
                                 if (jsonData.type === "lyric") {
                                     setCurrentLyric(jsonData.text);
                                 } else if (jsonData.type === "result") {
-                                    // Show both lyric and user's transcription
-                                    setCurrentLyric(`You sang: "${jsonData.text}" (${Math.round(jsonData.score * 100)}%)`);
-                                } else if (jsonData.error) {
+                                    // Only add to transcription log
+                                    setRecentTranscriptions(prev => [...prev, jsonData.text].slice(-5)); // Keep last 5
+                                } else if ('error' in jsonData) {
                                     setCurrentLyric(`Error: ${jsonData.error}`);
                                 }
                             }
@@ -126,40 +152,107 @@ const SingContent = () => {
         // Cleanup function if the user navigates away early
         return () => {
             isMounted = false;
-            abortController.abort();
+            try {
+                abortController.abort();
+            } catch (e) {
+                // Ignore abort errors - stream may already be complete
+            }
         };
     }, []); // Empty array - only run once on mount
 
     return (
-        <Card className="w-full max-w-5xl p-20 border-4 border-yellow-400">
-            <CardHeader className="mb-8">
-                {/* 4. Display the song name dynamically! */}
-                <CardTitle className="text-5xl text-center">
-                    Singing: <span className="text-yellow-600">"{songName}"</span>
-                </CardTitle>
-            </CardHeader>
-            
-            <CardContent>
-                <div className="flex flex-col items-center justify-center gap-8">
+        <>
+            {!isSessionEnded ? (
+                <Card className="w-full max-w-5xl p-20 border-4 border-yellow-400">
+                    <CardHeader className="mb-8">
+                        <CardTitle className="text-5xl text-center">
+                            Singing: <span className="text-yellow-600">"{songName}"</span>
+                        </CardTitle>
+                    </CardHeader>
+                    
+                    <CardContent>
+                        <div className="flex flex-col items-center justify-center gap-8">
+                            {/* Current Lyric Display */}
+                            <div 
+                                key={currentLyric}
+                                className="text-4xl text-center font-bold text-yellow-500 min-h-[60px] animate-in fade-in zoom-in-95 slide-in-from-bottom-2 duration-500"
+                            >
+                                {currentLyric}
+                            </div>
+                            
+                            {/* Recent Transcriptions Log */}
+                            {recentTranscriptions.length > 0 && (
+                                <div className="w-full bg-gray-100 rounded-lg p-4 max-h-48 overflow-y-auto">
+                                    <h3 className="font-bold text-lg mb-2">You Sang:</h3>
+                                    <div className="space-y-2">
+                                        {recentTranscriptions.map((text, idx) => (
+                                            <div key={idx} className="text-sm bg-white p-2 rounded border-l-4 border-yellow-400">
+                                                <span className="font-semibold">"{text}"</span>
+                                            </div>
+                                        ))}
+                                    </div>
+                                </div>
+                            )}
 
-                    <div 
-                        key={currentLyric}
-                        className="text-4xl text-center font-bold text-yellow-500 min-h-[60px] animate-in fade-in zoom-in-95 slide-in-from-bottom-2 duration-500"
-                    >
-                        {currentLyric}
-                    </div>
+                            <Button 
+                                variant="outline" 
+                                className="mt-8 h-10 text-xl px-7" 
+                                onClick={stopSession}
+                                disabled={isStopping}
+                            >
+                                {isStopping ? "Stopping..." : "⏹ Stop Session"}
+                            </Button>
+                        </div>
+                    </CardContent>
+                </Card>
+            ) : finalResults ? (
+                <Card className="w-full max-w-5xl p-20 border-4 border-yellow-400">
+                    <CardHeader className="mb-8">
+                        <CardTitle className="text-5xl text-center">
+                            Results: <span className="text-yellow-600">"{finalResults.song_name}"</span>
+                        </CardTitle>
+                    </CardHeader>
+                    
+                    <CardContent>
+                        <div className="flex flex-col gap-6">
+                            {/* Overall Summary Block */}
+                            {finalResults.summary && (
+                                <div className="w-full bg-gradient-to-br from-yellow-100 to-yellow-50 p-6 rounded-lg border-3 border-yellow-500 shadow-lg">
+                                    <h2 className="text-2xl font-bold mb-4 text-gray-800">Your Performance</h2>
+                                    <div className="grid grid-cols-2 gap-6">
+                                        <div>
+                                            <div className="text-sm font-semibold text-gray-700 mb-2">Original Lyrics</div>
+                                            <div className="bg-white p-4 rounded-lg border border-yellow-300 text-gray-800 leading-relaxed max-h-64 overflow-y-auto">
+                                                "{finalResults.summary.lyrics}"
+                                            </div>
+                                        </div>
+                                        <div>
+                                            <div className="text-sm font-semibold text-gray-700 mb-2">Everything You Sang</div>
+                                            <div className="bg-white p-4 rounded-lg border border-yellow-400 text-yellow-700 leading-relaxed max-h-64 overflow-y-auto font-semibold">
+                                                "{finalResults.summary.you_sang || '(No transcriptions recorded)'}"
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            )}
 
-                    <Button 
-                        variant="outline" 
-                        className="mt-8 h-10 text-xl px-7" 
-                        onClick={stopSession}
-                        disabled={isStopping}
-                    >
-                        {isStopping ? "Stopping..." : "⏹ Stop Session"}
-                    </Button>
-                </div>
-            </CardContent>
-        </Card>
+                            <Button 
+                                className="bg-yellow-400 text-black hover:bg-yellow-500 h-12 text-lg px-8 font-bold" 
+                                onClick={() => window.location.href = "/"}
+                            >
+                                🦆 Back to Home
+                            </Button>
+                        </div>
+                    </CardContent>
+                </Card>
+            ) : (
+                <Card className="w-full max-w-5xl p-20 border-4 border-yellow-400">
+                    <CardHeader className="mb-8">
+                        <CardTitle className="text-5xl text-center">Loading Results...</CardTitle>
+                    </CardHeader>
+                </Card>
+            )}
+        </>
     );
 };
 

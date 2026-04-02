@@ -46,6 +46,7 @@ class AudioTranscriber:
         self.audio = pyaudio.PyAudio()
         self.audio_queue = Queue(maxsize=1000)
         self.queue_lock = Lock()
+        self.transcription_output_queue = Queue(maxsize=1000)  # Output queue for transcriptions
 
         self.data = np.array([], dtype=np.int16)
         self.is_speaking = False
@@ -181,6 +182,19 @@ class AudioTranscriber:
                     self._save_audio_segment(segment, segment16k)
                 
                 text = self.transcribe_audio(segment16k)
+
+                # Push transcription result to output queue with timestamp
+                timestamp_seconds = (now_ns - self.t0) / 1_000_000_000
+                transcription_result = {
+                    "timestamp": timestamp_seconds,
+                    "text": text,
+                    "score": 0.0  # Placeholder for ASR confidence
+                }
+                
+                try:
+                    self.transcription_output_queue.put(transcription_result, block=False)
+                except:
+                    pass  # Drop if queue is full
 
                 print(
                     f"[{datetime.now()}] Finalized segment {(now_ns - self.t0) / 1_000_000:.0f} ms, transcription: {text}"

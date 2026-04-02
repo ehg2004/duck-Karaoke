@@ -9,6 +9,7 @@ import os
 from typing import Optional, Dict, Any, List
 from datetime import datetime
 from queue import Queue, Empty
+from difflib import SequenceMatcher
 
 # Import preprocessing functions
 from backend.core.preProcessSong import (
@@ -56,6 +57,7 @@ class KaraokeSession:
         self.lyrics = lyrics  # List of {"time": float, "phrase": str}
         self.instrumental_url = instrumental_url
         self.transcription_buffer = []  # {"timestamp": float, "text": str, "score": float}
+        self.scored_transcriptions = []  # Completed transcriptions with accuracy scores
         self.session_start_time = None
         self.is_active = False
         self.asr_thread: Optional[AudioTranscriber] = None
@@ -67,6 +69,26 @@ class KaraokeSession:
 _sessions: Dict[str, KaraokeSession] = {}
 _current_session_id: Optional[str] = None
 _sessions_lock = threading.Lock()
+
+def _calculate_match_score(transcribed_text: str, expected_lyric: str) -> float:
+    """
+    Calculate similarity score between transcribed text and expected lyric.
+    Returns a score from 0.0 to 1.0 where 1.0 is a perfect match.
+    
+    Uses sequence matching to handle minor differences like punctuation and capitalization.
+    """
+    if not transcribed_text or not expected_lyric:
+        return 0.0
+    
+    # Normalize text (lowercase, remove extra whitespace)
+    transcribed_normalized = transcribed_text.lower().strip()
+    expected_normalized = expected_lyric.lower().strip()
+    
+    # Calculate similarity ratio
+    matcher = SequenceMatcher(None, transcribed_normalized, expected_normalized)
+    similarity_ratio = matcher.ratio()
+    
+    return round(similarity_ratio, 3)
 
 def _parse_lrc_lyrics(lrc_path: str) -> List[Dict]:
     """Parse .lrc lyrics file into structured format"""
@@ -244,10 +266,10 @@ async def play_song(request: PlaySongRequest):
             session.asr_thread = AudioTranscriber(
                 sample_rate=48000,
                 channels=1,
-                # vad_timeout_ms=3000,
-                # vad_threshold=0.65,
+                vad_timeout_ms=1600,
+                vad_threshold=0.65,
                 verbose=False,
-                disable_denoiser=False,
+                disable_denoiser=True,  # Disable denoiser for karaoke sessions
                 device="cuda",
                 save_audio=True,
                 audio_save_dir=f"resources/debug_audio/{session_id}"
@@ -330,26 +352,46 @@ def _stream_karaoke_data(session_id: str):
                 else:
                     break
             
-            # Check for new ASR results from transcription buffer
-            if session.transcription_buffer:
-                # Get the most recent transcription
-                transcription = session.transcription_buffer.pop(0)
-                
-                # Find matching lyrics based on timestamp
-                matched_lyric_index = None
-                for i, lyric in enumerate(session.lyrics):
-                    if abs(lyric["time"] - transcription["timestamp"]) < 2.0:  # 2 second tolerance
-                        matched_lyric_index = i
-                        break
-                
-                response = {
-                    "type": "result",
-                    "text": transcription["text"],
-                    "timestamp": transcription["timestamp"],
-                    "score": transcription.get("score", 0.0),
-                    "matched_lyric_index": matched_lyric_index
-                }
-                yield f"data: {json.dumps(response)}\n\n"
+            # Check for new ASR results from transcription output queue
+            if session.asr_thread and not session.asr_thread.transcription_output_queue.empty():
+                try:
+                    # Get transcription from ASR module's output queue
+                    transcription = session.asr_thread.transcription_output_queue.get(block=False)
+                    
+                    # Find matching lyrics based on timestamp
+                    matched_lyric_index = None
+                    matched_lyric_texts = []  # Collect all matching lyrics
+                    match_score = 0.0
+                    
+                    for i, lyric in enumerate(session.lyrics):
+                        if abs(lyric["time"] - transcription["timestamp"]) < 2.0:  # 2 second tolerance
+                            matched_lyric_index = i
+                            matched_lyric_texts.append(lyric["phrase"])
+                    
+                    # Combine all matched lyrics into a single string
+                    matched_lyric_text = " ".join(matched_lyric_texts) if matched_lyric_texts else None
+                    
+                    if matched_lyric_text:
+                        # Calculate accuracy score between transcription and expected lyric
+                        match_score = _calculate_match_score(transcription["text"], matched_lyric_text)
+                    
+                    response = {
+                        "type": "result",
+                        "text": transcription["text"],
+                        "timestamp": transcription["timestamp"],
+                        "asr_confidence": transcription.get("score", 0.0),  # ASR model confidence
+                        "matched_lyric_index": matched_lyric_index,
+                        "matched_lyric": matched_lyric_text,
+                        "accuracy_score": match_score,  # Score comparing transcription vs lyrics (0-1)
+                        "accuracy_percentage": round(match_score * 100, 1)  # Percentage format
+                    }
+                    
+                    # Store for final results
+                    session.scored_transcriptions.append(response)
+                    
+                    yield f"data: {json.dumps(response)}\n\n"
+                except Empty:
+                    pass
             
             # Update ASR thread (process audio queue)
             if session.asr_thread:
@@ -423,6 +465,7 @@ async def stop_session(session_id: str):
 async def get_final_results():
     """
     Retrieve final karaoke results after session ends.
+    Recalculates all statistics from scratch for accuracy.
     """
     global _current_session_id
     
@@ -445,13 +488,32 @@ async def get_final_results():
             if session.asr_thread:
                 session.asr_thread.stop()
             
-            # Compile final results
+            # Concatenate all original lyrics from the song
+            all_lyrics = " ".join([lyric.get("phrase", "") for lyric in session.lyrics])
+            
+            # Concatenate all "you sang" transcriptions into a single string
+            all_you_sang = " ".join([trans.get("text", "") for trans in session.scored_transcriptions])
+            
+            # Recalculate scores from scratch for all transcriptions
+            recalculated_transcriptions = []
+            
+            for trans in session.scored_transcriptions:
+                # Reconstruct transcription with all song lyrics
+                recalculated_trans = {
+                    "you_sang": trans.get("text", ""),
+                    "lyrics": all_lyrics,
+                }
+                
+                recalculated_transcriptions.append(recalculated_trans)
+            
+            # Compile final results - simplified to show only lyrics vs transcription
             final_results = {
                 "song_name": session.song_name,
-                "session_duration": time.time() - session.session_start_time if session.session_start_time else 0,
-                "transcriptions": session.transcription_buffer,
-                "total_transcriptions": len(session.transcription_buffer),
-                "lyrics_count": len(session.lyrics),
+                "transcriptions": recalculated_transcriptions,
+                "summary": {
+                    "lyrics": all_lyrics,
+                    "you_sang": all_you_sang
+                },
                 "completed_at": datetime.now().isoformat()
             }
             
