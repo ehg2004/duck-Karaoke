@@ -32,7 +32,8 @@ const Page = () => {
                 const data = await response.json();
                 console.log("Success! Backend says:", data);
                 
-                router.push(`/sing?song=${encodeURIComponent(song)}`);
+                // Pass the session_id to the sing page
+                router.push(`/sing?session_id=${encodeURIComponent(data.session_id)}&song=${encodeURIComponent(data.song_name)}`);
             } else {
                 console.error("Backend returned an error.");
                 alert("Uh oh, something went wrong.");

@@ -46,7 +46,7 @@ class KaraokeRequest(BaseModel):
     artist: Optional[str] = None
 
 class PlaySongRequest(BaseModel):
-    song_name: str
+    session_id: str
 
 # Global state for karaoke session
 class KaraokeSession:
@@ -60,6 +60,8 @@ class KaraokeSession:
         self.is_active = False
         self.asr_thread: Optional[AudioTranscriber] = None
         self.final_results = []
+        self.audio_player = None  # Subprocess for audio playback
+        self.stream_connected = False  # Flag to prevent multiple concurrent streams
 
 # Global sessions dictionary
 _sessions: Dict[str, KaraokeSession] = {}
@@ -102,6 +104,28 @@ def _parse_lrc_lyrics(lrc_path: str) -> List[Dict]:
         print(f"Error parsing LRC file: {e}")
     
     return lyrics
+
+def _play_audio(audio_path: str):
+    """
+    Play an audio file using ffplay (CLI).
+    Returns the Popen object so it can be stopped later.
+    """
+    try:
+        import subprocess
+        player = subprocess.Popen(
+            ["ffplay", "-nodisp", "-autoexit", "-loglevel", "error", audio_path],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        print(f"Started playing audio: {audio_path}")
+        return player
+    except FileNotFoundError:
+        print("Warning: ffplay not found. Make sure ffmpeg is installed.")
+        print("Install with: sudo apt-get install ffmpeg (Ubuntu/Debian) or brew install ffmpeg (Mac)")
+        return None
+    except Exception as e:
+        print(f"Error starting audio playback: {e}")
+        return None
 
 @router.post("/process")
 async def process_song(request: KaraokeRequest):
@@ -152,6 +176,8 @@ async def process_song(request: KaraokeRequest):
         if not lyrics_data:
             print(f"Warning: No synced lyrics found for {song_name}")
             lyrics_data = []
+
+        print("Lyrics data parsed:", lyrics_data)
         
         # Update the index CSV
         upsert_index_row(
@@ -203,61 +229,79 @@ async def play_song(request: PlaySongRequest):
     global _current_session_id
     
     try:
-        song_name = request.song_name
+        session_id = request.session_id
         
-        # Find or create session
+        # Find session by ID
         with _sessions_lock:
-            session = None
-            for sid, s in _sessions.items():
-                if s.song_name == song_name:
-                    session = s
-                    _current_session_id = sid
-                    break
+            if session_id not in _sessions:
+                raise HTTPException(status_code=404, detail=f"Session '{session_id}' not found. Please process a song first.")
             
-            if not session:
-                raise HTTPException(status_code=404, detail=f"Song '{song_name}' not processed yet")
+            session = _sessions[session_id]
+            _current_session_id = session_id
             
             # Initialize ASR thread
-            print(f"Starting ASR thread for: {song_name}")
+            print(f"Starting ASR thread for session: {session_id}")
             session.asr_thread = AudioTranscriber(
                 sample_rate=48000,
                 channels=1,
-                vad_timeout_ms=300,
-                vad_threshold=0.5,
+                # vad_timeout_ms=3000,
+                # vad_threshold=0.65,
                 verbose=False,
                 disable_denoiser=False,
-                device="cpu"
+                device="cuda",
+                save_audio=True,
+                audio_save_dir=f"resources/debug_audio/{session_id}"
             )
             
             session.is_active = True
             session.session_start_time = time.time()
+            
+            # Start playing the instrumental audio
+            print(f"Starting audio playback: {session.instrumental_url}")
+            session.audio_player = _play_audio(session.instrumental_url)
+        
         
         return {
             "status": "success",
-            "message": f"Karaoke session started for {song_name}",
-            "session_id": _current_session_id
+            "message": f"Karaoke session started",
+            "session_id": session_id,
+            "song_name": session.song_name
         }
     
+    except HTTPException:
+        raise
     except Exception as e:
         print(f"Error starting karaoke session: {e}")
         raise HTTPException(status_code=500, detail=f"Error starting session: {str(e)}")
 
-def _stream_karaoke_data():
+def _stream_karaoke_data(session_id: str):
     """
     Core streaming generator that yields lyrics and ASR results in real-time.
     Implements the loop from the sequence diagram.
     """
-    global _current_session_id
+
+    print(f"Client attempting to connect to karaoke stream for session {session_id}")
     
     with _sessions_lock:
-        if not _current_session_id or _current_session_id not in _sessions:
-            yield f"data: {json.dumps({'error': 'No active session'})}\n\n"
+        if session_id not in _sessions:
+            yield f"data: {json.dumps({'error': 'Session not found'})}\n\n"
             return
         
-        session = _sessions[_current_session_id]
+        session = _sessions[session_id]
+        
+        # Prevent multiple concurrent streams
+        if session.stream_connected:
+            print(f"Stream already connected for session {session_id}. Rejecting new connection.")
+            yield f"data: {json.dumps({'error': 'Stream already active for this session'})}\n\n"
+            return
+        
+        session.stream_connected = True
+        print(f"Client connected to karaoke stream for session {session_id}")
     
     if not session.is_active:
         yield f"data: {json.dumps({'error': 'Session not active'})}\n\n"
+        with _sessions_lock:
+            session.stream_connected = False
         return
     
     # Track which lyrics line we've already sent
@@ -314,18 +358,66 @@ def _stream_karaoke_data():
             time.sleep(0.05)  # Poll rate: 20Hz
     
     except GeneratorExit:
-        print("Client disconnected from stream")
+        print(f"Client disconnected from stream for session {session_id}")
+    finally:
+        with _sessions_lock:
+            session.stream_connected = False
 
 @router.get("/stream_karaoke")
-async def stream_karaoke():
+async def stream_karaoke(session_id: str):
     """
     Streaming endpoint for real-time karaoke data (lyrics + ASR results).
     Uses Server-Sent Events (SSE) format.
     """
     return StreamingResponse(
-        _stream_karaoke_data(),
+        _stream_karaoke_data(session_id),
         media_type="text/event-stream"
     )
+
+@router.get("/stop_session")
+async def stop_session(session_id: str):
+    """
+    Stop a karaoke session: terminate ASR thread, stop audio playback, and clean up.
+    """
+    try:
+        with _sessions_lock:
+            if session_id not in _sessions:
+                raise HTTPException(status_code=404, detail=f"Session '{session_id}' not found")
+            
+            session = _sessions[session_id]
+            
+            # Mark session as inactive to stop streaming
+            session.is_active = False
+            session.stream_connected = False
+            
+            # Stop audio playback
+            if session.audio_player:
+                try:
+                    session.audio_player.terminate()
+                    session.audio_player.wait(timeout=2)
+                    print(f"[{datetime.now()}] Stopped audio playback for {session_id}")
+                except Exception as e:
+                    print(f"[{datetime.now()}] Error stopping audio player: {e}")
+            
+            # Stop ASR thread
+            if session.asr_thread:
+                try:
+                    session.asr_thread.stop()
+                    print(f"[{datetime.now()}] Stopped ASR thread for {session_id}")
+                except Exception as e:
+                    print(f"[{datetime.now()}] Error stopping ASR thread: {e}")
+        
+        return {
+            "status": "success",
+            "message": f"Session {session_id} stopped",
+            "session_id": session_id
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error stopping session: {e}")
+        raise HTTPException(status_code=500, detail=f"Error stopping session: {str(e)}")
 
 @router.get("/FinalResults")
 async def get_final_results():
@@ -343,6 +435,11 @@ async def get_final_results():
             
             # Mark session as inactive
             session.is_active = False
+            
+            # Stop audio playback
+            if session.audio_player:
+                session.audio_player.terminate()
+                print(f"Stopped audio playback")
             
             # Stop ASR thread
             if session.asr_thread:

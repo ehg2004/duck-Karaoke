@@ -77,7 +77,7 @@ def downloadResources(yt_url, prefixPath):
 
     cmd = (
         f'bash -c "source ~/.profile && '
-        f'yt-dlp_linux -t mp3  "{yt_url}" -P "{prefixPath}""'
+        f'yt-dlp -t mp3  "{yt_url}" -P "{prefixPath}""'
     )
 
     downloaded_file = None

@@ -31,11 +31,25 @@ make
 pip install git+https://github.com/Desklop/RNNoise_Wrapper.git
 ```
 
+Install the required Python packages:
 ```
 pip install -r requirements.txt
 sudo apt install portaudio19-dev
 pip install pyaudio
 ```
+## Run the application:
+```
+#frontend:
+npm run dev
+
+#backend:
+uvicorn backend.main:app --reload
+
+#whisper on amd npu:
+flm serve --asr 1
+
+```
+
 
 
 ```

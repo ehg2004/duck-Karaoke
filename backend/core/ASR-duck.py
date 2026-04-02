@@ -20,15 +20,20 @@ class AudioTranscriber:
         self,
         sample_rate=48000,
         channels=1,
-        vad_timeout_ms=300,
-        vad_threshold=0.5,
+        vad_timeout_ms=3000,
+        vad_threshold=0.65,
         verbose=False,
-        disable_denoiser=False,
+        disable_denoiser=True,
         device="cpu",
+        save_audio=True,
+        audio_save_dir="debug_audio",
     ):
         self.device = device
         self.verbose = verbose
         self.disable_denoiser = disable_denoiser
+        self.save_audio = save_audio
+        self.audio_save_dir = audio_save_dir
+        self.segment_counter = 0
 
         self.SAMPLE_RATE = sample_rate
         self.CHANNELS = channels
@@ -46,6 +51,12 @@ class AudioTranscriber:
         self.is_speaking = False
         self.t_last = time_ns()
         self.t0 = self.t_last
+
+        # Create debug audio directory if saving is enabled
+        if self.save_audio:
+            import os
+            os.makedirs(self.audio_save_dir, exist_ok=True)
+            print(f"[{datetime.now()}] Audio persistence enabled: {self.audio_save_dir}")
 
         self.denoiser = None
         if not self.disable_denoiser:
@@ -93,11 +104,25 @@ class AudioTranscriber:
         raise RuntimeError('OpenAI local Whisper API not available. Ensure FastFlowLM is running on http://127.0.0.1:52625')
 
     def stop(self):
-        if hasattr(self, 'stream') and self.stream.is_active():
-            self.stream.stop_stream()
-            self.stream.close()
-        self.audio.terminate()
-        print(f"[{datetime.now()}] Audio stream stopped")
+        """Gracefully stop the audio stream and clean up resources."""
+        try:
+            if hasattr(self, 'stream') and self.stream:
+                try:
+                    if self.stream.is_active():
+                        self.stream.stop_stream()
+                    self.stream.close()
+                except Exception as e:
+                    print(f"[{datetime.now()}] Error closing stream: {e}")
+            
+            if hasattr(self, 'audio') and self.audio:
+                try:
+                    self.audio.terminate()
+                except Exception as e:
+                    print(f"[{datetime.now()}] Error terminating PyAudio: {e}")
+            
+            print(f"[{datetime.now()}] Audio stream stopped")
+        except Exception as e:
+            print(f"[{datetime.now()}] Error during stop: {e}")
 
     def audio_callback(self, in_data, frame_count, time_info, status):
         audio_int16 = np.frombuffer(in_data, dtype=np.int16)
@@ -150,6 +175,11 @@ class AudioTranscriber:
                     segment = self.remove_noise(segment)
 
                 segment16k = self.decimate_cast(segment, passthrough=False)
+                
+                # Save audio segments if persistence is enabled
+                if self.save_audio:
+                    self._save_audio_segment(segment, segment16k)
+                
                 text = self.transcribe_audio(segment16k)
 
                 print(
@@ -184,17 +214,27 @@ class AudioTranscriber:
 
     @staticmethod
     def int2float(sound):
-        sound = np.asarray(sound, dtype=np.float32)
+        """Convert int16 audio array to float32 (-1.0 to 1.0 range)."""
         abs_max = np.abs(sound).max() if sound.size > 0 else 0.0
+        sound = sound.astype('float32')
         if abs_max > 0:
             sound = sound / 32768.0
+        sound = sound.squeeze()  # Remove extra dimensions if present
         return sound
 
     @staticmethod
     def float2int(sound):
-        sound = np.asarray(sound, dtype=np.float32)
-        sound = np.clip(sound, -1.0, 1.0)
-        return np.round(sound * 32767).astype(np.int16)
+        """Convert float32 audio array to int16.
+        
+        NOTE: Clipping is intentionally disabled. Audio values > 1.0 or < -1.0 
+        are allowed to overflow naturally to preserve dynamic range.
+        """
+        if not ((sound.dtype == np.float32) or (sound.dtype == np.float64)):
+            sound = np.asarray(sound, dtype=np.float32)
+        
+        # DO NOT CLIP - allows natural overflow for better audio quality
+        sound = np.round(sound * 32768.0)  # Use 32768 for full int16 range
+        return sound.astype(np.int16, copy=False).squeeze()
 
     def remove_noise(self, audio_np):
         if len(audio_np) == 0:
@@ -239,6 +279,27 @@ class AudioTranscriber:
             return np.pad(audio, (0, pad_length), mode="constant")
         return audio
 
+    def _save_audio_segment(self, audio_48k, audio_16k):
+        """Save audio segment to disk for debugging (both 48k and 16k versions)."""
+        try:
+            import soundfile as sf
+            
+            self.segment_counter += 1
+            
+            # Save 48kHz version (original)
+            filename_48k = f"{self.audio_save_dir}/segment_{self.segment_counter:04d}_48k.wav"
+            audio_float_48k = self.int2float(audio_48k)
+            sf.write(filename_48k, audio_float_48k, 48000, format='WAV')
+            
+            # Save 16kHz version (decimated for ASR)
+            filename_16k = f"{self.audio_save_dir}/segment_{self.segment_counter:04d}_16k.wav"
+            audio_float_16k = self.int2float(audio_16k)
+            sf.write(filename_16k, audio_float_16k, 16000, format='WAV')
+            
+            print(f"[{datetime.now()}] Saved audio segment {self.segment_counter} (48k: {len(audio_48k)} samples, 16k: {len(audio_16k)} samples)")
+        except Exception as e:
+            print(f"[{datetime.now()}] Error saving audio segment: {e}")
+
     def transcribe_audio(self, audio_int16_16khz):
         if self.asr_backend == 'openai_local_whisper':
             return self._transcribe_with_openai_local_whisper(audio_int16_16khz)
@@ -247,17 +308,28 @@ class AudioTranscriber:
 
     def _transcribe_with_openai_local_whisper(self, audio_int16_16khz):
         try:
-            import tempfile
             import soundfile as sf
+            import os
             
             # Apply padding to ensure min 30s of audio
             audio_int16_16khz = self.audio_padding(audio_int16_16khz)
             
-            # Convert int16 to float32 and save to temporary WAV file
+            # Convert int16 to float32
             audio_float = self.int2float(audio_int16_16khz)
-            with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as f:
-                sf.write(f.name, audio_float, 16000, format='WAV')
-                temp_path = f.name
+            
+            # Save to debug directory instead of /tmp if audio persistence is enabled
+            if self.save_audio:
+                temp_path = f"{self.audio_save_dir}/transcribe_input_{self.segment_counter:04d}.wav"
+                sf.write(temp_path, audio_float, 16000, format='WAV')
+                print(f"[{datetime.now()}] Transcription input saved: {temp_path}")
+                should_clean_up = False
+            else:
+                # Use system temp if not saving
+                import tempfile
+                with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as f:
+                    sf.write(f.name, audio_float, 16000, format='WAV')
+                    temp_path = f.name
+                should_clean_up = True
             
             # Call local OpenAI API (FastFlowLM)
             with open(temp_path, 'rb') as f:
@@ -266,9 +338,9 @@ class AudioTranscriber:
                     file=f,
                 )
             
-            # Clean up temp file
-            import os
-            os.unlink(temp_path)
+            # Clean up temp file only if using system temp directory
+            if should_clean_up:
+                os.unlink(temp_path)
             
             return resp.text.strip()
         except Exception as e:
@@ -281,7 +353,7 @@ class AudioTranscriber:
 
 def main():
     print(f"CUDA available: {torch.cuda.is_available()}")
-    transcriber = AudioTranscriber(verbose=True, vad_timeout_ms=3000, vad_threshold=0.5, disable_denoiser=False,device="cuda" if torch.cuda.is_available() else "cpu")
+    transcriber = AudioTranscriber(verbose=True, vad_timeout_ms=3000, vad_threshold=0.5, disable_denoiser=True,device="cuda" if torch.cuda.is_available() else "cpu")
 
     try:
         while True:
