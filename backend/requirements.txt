@@ -1,2 +1,8 @@
 fastapi
 uvicorn
+torch
+scypi
+numpy
+matplotlib
+torchaudio
+soundfile

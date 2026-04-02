@@ -19,4 +19,23 @@ curl -L -o vocal-remover-v6.0.0b4.zip "https://github.com/tsurumeso/vocal-remove
 
 unzip vocal-remover-v6.0.0b4.zip -d vocal_remover
 
+#Install RNNoise:
+
+```
+cd ~/
+git clone https://github.com/xiph/rnnoise.git
+cd rnnoise/
+./autogen.sh
+./configure
+make
+pip install git+https://github.com/Desklop/RNNoise_Wrapper.git
+```
+
+```
+pip install -r requirements.txt
+sudo apt install portaudio19-dev
+pip install pyaudio
+```
+
+
 ```
